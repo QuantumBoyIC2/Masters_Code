@@ -1,0 +1,485 @@
+---
+title: "agricultural_intensity_management"
+author: "Marks"
+date: "2025-03-14"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(sf)
+library(raster)
+library(terra)
+library(sfheaders)
+library(tools)
+library(dplyr)
+library(readxl)
+library(tidyverse)
+library(fasterize)
+```
+
+```{r Variable chunk}
+territory_name <- "Platone" #Izvēlēties Taurene vai Platone
+```
+
+```{r Function definition chunk - determine agricultural intensity}
+GCI_raster_location <- "..\\Maģistra darbs\\PotentialPedoDiversity\\Cropping_Intensity_30m_2016_2018_N60E020.tif"
+
+prepare_extent_polygon <- function(territory_name) {
+  raster_location <- file.path(
+    "..\\Maģistra darbs/PotentialPedoDiversity",
+    paste0(territory_name, "_PPD"),"END_FILES/FAO_1", paste0(territory_name, "FAO_13_PPD_index.tif"))
+  
+  extent_raster <- terra::ext(rast(raster_location))
+  bbox <- st_bbox(extent_raster)
+  
+  dataframe <- data.frame(
+    X_coord = c(bbox["xmin"], bbox["xmax"], bbox["xmax"], bbox["xmin"]), 
+    Y_coord = c(bbox["ymax"], bbox["ymax"], bbox["ymin"], bbox["ymin"])
+  )
+  
+  polygon <- sfheaders::sf_polygon(
+    obj = dataframe,
+    x = "X_coord",
+    y = "Y_coord"
+  )
+  return(polygon)
+}
+clip_to_extent <- function(shape_location_list, polygon) { 
+path <- paste0("..\\Maģistra darbs\\LAD_dati\\", paste0(territory_name, "_LAD_dati"))
+  shape_location_list <- list.files(path, pattern = "\\.parquet$", full.names = TRUE)
+  crs <- st_crs(sfarrow::st_read_parquet(shape_location_list[1], quiet = TRUE))
+  st_crs(polygon) <- crs
+  shape_list <- list()
+  
+  for (i in seq_along(shape_location_list)) {
+    name <- file_path_sans_ext(basename(shape_location_list[i]))
+    shape <- sfarrow::st_read_parquet(shape_location_list[i])
+    shape <- suppressWarnings(st_cast(shape, "POLYGON"))
+    cut_shape <- suppressWarnings(st_intersection(shape, polygon))
+    shape_list[[name]] <- cut_shape
+    cat("Polygon", i, "out of", length(shape_location_list), "clipped! \n")
+  }
+  return(shape_list)
+}
+combine_LAD_polygons_across_years <- function(territory_name, shape_list) {
+  if (territory_name == "Taurene") {
+    region <- "ziemelvidzeme_2023_simplified"}
+  else if (territory_name == "Platone") {
+    region <- "zemgale_2023_simplified"}
+  
+  LAD_polygons <- shape_list[[region]]
+  
+  for (i in seq_along(shape_list)) {
+    
+    if (i == 1) {
+      x <- LAD_polygons %>% dplyr::select(PERIOD_CODE, PRODUCT_CODE, geometry)
+      y <- shape_list[[i]] %>% dplyr::select(PERIOD_CODE, PRODUCT_CODE, geometry)
+      joined <- st_join(x, y, join = st_intersects)
+      cat("Iteration", i, "complete! Joined", region, "to", names(shape_list[i]), "!\n")
+    } 
+    else if (i == 2) {
+      x <- joined
+      y <- shape_list[[i]] %>% dplyr::select(PERIOD_CODE, PRODUCT_CODE, geometry)
+      joined <- st_join(x, y, join = st_intersects)
+      joined <- joined[!duplicated(st_geometry(joined)), ]
+      cat("Iteration", i, "complete! Joined previous result with", names(shape_list[i]), "!\n")
+    } 
+    else if (i > 2 && i < length(shape_list)) {
+      x <- joined
+      y <- shape_list[[i]] %>% dplyr::select(PERIOD_CODE, PRODUCT_CODE, geometry)
+      joined <- st_join(x, y, join = st_intersects)
+      joined <- joined[!duplicated(st_geometry(joined)), ]
+      cat("Iteration", i, "complete! Joined previous result with", names(shape_list[i]), "!\n")
+    } 
+    else if (i == length(shape_list)) {
+      joined <- joined
+      joined <- suppressWarnings(st_cast(joined, "POLYGON"))
+      cat("Iteration", i, ": no files joined anymore!")}
+  }
+  
+  return(joined)
+}
+determine_LAD_class <- function(LAD_polygons) {
+  LAD_polygons$ID <- 1:nrow(LAD_polygons)
+  df <- LAD_polygons %>% st_drop_geometry()
+  df$END_CLASS <- numeric(nrow(df))
+  
+  for (i in 1:nrow(df)) {
+    row_summary <- df[i, ] %>%
+      dplyr::select(starts_with("PRODUCT_CODE")) %>%
+      st_drop_geometry() %>%
+      pivot_longer(everything(), names_to = "column", values_to = "value") %>%
+      group_by(value) %>%
+      summarise(count = n(), .groups = "drop")
+    
+    max_count_value <- row_summary %>%
+      filter(count == max(count)) %>%
+      pull(value)
+    
+    suppressWarnings(df$END_CLASS[i] <- max_count_value)
+    
+    if (i %% 100 == 0) {
+      cat("100 rows completed! Iteration Nr:", i, "!\n")
+    }
+  }
+  
+  df <- df %>% dplyr::select(ID, END_CLASS)
+  LAD_polygons <- left_join(LAD_polygons, df, by = "ID")
+  LAD_polygons <- LAD_polygons[!is.na(LAD_polygons$END_CLASS), ]
+  
+  return(LAD_polygons)
+}
+aggregate_LAD_classes <- function(LAD_polygons, shape_list) {
+  tabula <- read_excel("..\\Maģistra darbs\\LAD_dati\\kulturaugu kodi.xlsx", sheet = "Pamatdati")
+  tabula <- tabula %>% rename(END_CLASS = KODS)
+  LAD_polygons$END_CLASS <- as.numeric(LAD_polygons$END_CLASS)
+  LAD_polygons <- left_join(LAD_polygons, tabula, by = "END_CLASS") 
+  st_crs(LAD_polygons) <- st_crs(shape_list[[1]])
+  LAD_polygons <- LAD_polygons %>% dplyr::select(Liela_klase, geometry)
+}
+prepare_stacked_LAD_and_CGI_raster <- function(LAD_polygons, GCI_raster_location, territory_name) {
+  ref_PPD_raster <- rast(file.path(
+  "../Maģistra darbs/PotentialPedoDiversity",
+  paste0(territory_name, "_PPD"), "END_FILES", "FAO_1", paste0(territory_name, "FAO_13_PPD_index.tif")
+))
+  
+  GCI_raster <- rast(GCI_raster_location) 
+  GCI_raster <- GCI_raster[["numberofcycle"]]
+  ext <- ext(project(ref_PPD_raster, crs(GCI_raster)))
+  GCI_raster <- crop(GCI_raster, ext)
+  values(GCI_raster)[values(GCI_raster) == -1] <- NA
+  GCI_raster <- project(GCI_raster, crs(ref_PPD_raster))
+  GCI_raster <- resample(GCI_raster, ref_PPD_raster)
+      
+  LAD_raster <- rasterize(LAD_polygons, ref_PPD_raster, field = "Liela_klase")
+  stack <- c(LAD_raster, GCI_raster, ref_PPD_raster)
+  LAD_GCI_df <- na.omit(as.data.frame(stack, xy = TRUE))
+  return(LAD_GCI_df)
+}
+```
+
+```{r Function application chunk - determine agricultural intensity}
+polygon <- prepare_extent_polygon(territory_name)
+shape_list <- clip_to_extent(territory_name, polygon)
+LAD_polygons <- combine_LAD_polygons_across_years(territory_name, shape_list)
+LAD_polygons <- determine_LAD_class(LAD_polygons)
+LAD_polygons <- aggregate_LAD_classes(LAD_polygons, shape_list)
+
+Taurene_LAD_GCI_df <- prepare_stacked_LAD_and_CGI_raster(LAD_polygons, GCI_raster_location, territory_name)
+Platone_LAD_GCI_df <- prepare_stacked_LAD_and_CGI_raster(LAD_polygons, GCI_raster_location, territory_name)
+
+rm(list = setdiff(ls(), c("Taurene_LAD_GCI_df", "Platone_LAD_GCI_df")))
+```
+
+```{r Prepare a combined dataframe for analysis}
+Platone_LAD_GCI_df <- Platone_LAD_GCI_df %>% rename(PPD_INDEX = PlatoneFAO_13_PPD_index)
+Taurene_LAD_GCI_df <- Taurene_LAD_GCI_df %>% rename(PPD_INDEX = TaureneFAO_13_PPD_index)
+
+Platone_LAD_GCI_df$PlatoneFAO_13_PPD_index <- NULL
+Taurene_LAD_GCI_df$TaureneFAO_13_PPD_index <- NULL
+
+Platone_LAD_GCI_df$Teritorija <- "Platone"
+Taurene_LAD_GCI_df$Teritorija <- "Taurene"
+
+combined_dataframe <- rbind(Platone_LAD_GCI_df, Taurene_LAD_GCI_df)
+rm(list = setdiff(ls(), "combined_dataframe"))
+```
+
+```{r Perform cluster analysis to determine intensity classes}
+
+#Clusterization
+attr(combined_dataframe, "na.action") <- NULL
+combined_dataframe$numberofcycle <- round(combined_dataframe$numberofcycle, 0)
+
+stats2 <- combined_dataframe %>% 
+  group_by(Liela_klase) %>%
+  summarize(
+    mean = round(mean(numberofcycle), 2),
+    sd = sd(numberofcycle),
+    n = n()
+  ) %>%
+  arrange(mean) %>%
+  mutate(
+    new_cluster = 1:n(),
+    error_margin = qt(0.975, df = n - 1) * (sd / sqrt(n)),  # 95% CI
+    lower_ci = round(mean - error_margin, 2),
+    upper_ci = round(mean + error_margin, 2)
+  ) %>%
+  select(Liela_klase, mean, lower_ci, upper_ci, new_cluster)
+
+combined_dataframe <- combined_dataframe %>%
+  left_join(stats2 %>% select(Liela_klase, new_cluster), by = "Liela_klase") %>%
+  mutate(cluster = new_cluster) %>%
+  select(-new_cluster) 
+
+rm(list = setdiff(ls(), "combined_dataframe"))
+```
+
+```{r Add soil type data to each cell}
+  konturas <- st_read(file.path(
+  "../Maģistra darbs/PotentialPedoDiversity",
+  paste0(territory_name, "_PPD"),
+  paste0(territory_name, "_konturas.shp")
+))
+
+value <- "PAK23"
+
+map_unique_names <- function(konturas, value) {
+  unique_values <- unique(konturas[[value]])
+  map_unique_values <- setNames(seq_along(unique_values), unique_values)
+  colname <- paste0(value, "numeric")
+  konturas[[colname]] <- map_unique_values[konturas[[value]]]
+  return(konturas)
+}
+konturas <- map_unique_names(konturas, value)
+
+subset_unique_names <- function(konturas) {
+  subs <- konturas %>% group_by(PAK23) %>% select(PAK23, PAK23numeric) %>% distinct()
+  subs <- st_drop_geometry(subs)
+  subs <- subs %>% group_by(PAK23) %>% summarize(NUM_CODE = max(PAK23numeric))
+  return(subs)
+}
+unique_konturas <- subset_unique_names(konturas)
+
+create_value_raster <- function(konturas, value, cell_size) {
+ raster_template <- raster(ext = extent(konturas), 
+                          resolution = cell_size, 
+                          crs = st_crs(konturas)$proj4string)
+value <- paste0(value, "numeric")
+rastr <- fasterize(konturas, raster_template, field = value, fun = "first")
+return(rastr)
+}
+value_raster <- create_value_raster(konturas, value, 30)
+
+append_to_intensity_PPD_raster <- function(combined_dataframe, value_raster, territory_name) {
+  combined_dataframe$ID_xy <- paste(combined_dataframe$x, combined_dataframe$y, sep = "_")
+  ter_df <- na.omit(as.data.frame(value_raster, xy=TRUE))
+  ter_df$ID_xy <- paste(ter_df$x, ter_df$y, sep = "_")
+  
+  ter_df_renamed <- ter_df %>%
+    select(ID_xy, layer) %>%
+    rename(!!paste0(territory_name, "_layer") := layer)
+
+combined_dataframe <- left_join(combined_dataframe, ter_df_renamed, by = "ID_xy")
+  return(combined_dataframe)
+}
+
+combined_dataframe<- append_to_intensity_PPD_raster(combined_dataframe, value_raster, territory_name)
+unique_kont_Plat <- unique_konturas
+rm(list = setdiff(ls(), c("unique_kont_Plat", "unique_kont_Taur", "combined_dataframe")))
+```
+
+```{r Rename soil cols and append}
+backup <- combined_dataframe
+replace_col_names <- function(unique_kont_Taur, combined_dataframe, unique_kont_Plat) {
+  combined_dataframe$SOIL_CLASS <- NA
+  
+  for (i in 1:nrow(combined_dataframe)) {
+    if(!is.na(combined_dataframe$Taurene_layer[i])) {
+      value <- combined_dataframe$Taurene_layer[i]
+      lookup_row <- which(unique_kont_Taur$NUM_CODE == value)
+      
+      if(length(lookup_row) > 0) {
+        combined_dataframe$SOIL_CLASS[i] <- unique_kont_Taur$PAK23[lookup_row]
+      }
+      
+    } else if(is.na(combined_dataframe$Taurene_layer[i])) {
+      value <- combined_dataframe$Platone_layer[i]
+      
+      lookup_row <- which(unique_kont_Plat$NUM_CODE == value)
+      
+      if(length(lookup_row) > 0) {
+        combined_dataframe$SOIL_CLASS[i] <- unique_kont_Plat$PAK23[lookup_row]
+      }
+    }
+    
+    if (i %% 5000 == 0) {
+      cat("5000 rows completed! Iteration Nr:", i, "out of", nrow(combined_dataframe), "!\n")
+    }
+  }
+  
+  return(combined_dataframe)
+}
+
+combined_dataframe <- replace_col_names(unique_kont_Taur, combined_dataframe, unique_kont_Plat)
+combined_dataframe$ID_xy <- NULL
+combined_dataframe$Taurene_layer <- NULL
+combined_dataframe$Platone_layer<- NULL
+library(dplyr)
+
+combined_dataframe <- combined_dataframe %>%
+  mutate(SOIL_CLASS = ifelse(SOIL_CLASS == "LUVISOL", "LUVISOLS", SOIL_CLASS))
+
+writexl::write_xlsx(combined_dataframe, "..\\Maģistra darbs\\PotentialPedoDiversity\\Stat analysis\\PEDODIVERSITY_FOR_ANALYSIS\\FAO3_PPD_dataframe.xlsx", col_names = TRUE)
+```
+
+```{r ggplot: intensity rasters}
+  konturas <- st_read(file.path(
+  "../Maģistra darbs/PotentialPedoDiversity",
+  paste0(territory_name, "_PPD"),
+  paste0(territory_name, "_konturas.shp")
+))
+
+aggregate_intensity_LAD_classes <- function(LAD_polygons, shape_list) {
+  tabula <- read_excel("..\\Maģistra darbs\\LAD_dati\\kulturaugu kodi.xlsx", sheet = "Pamatdati")
+  tabula <- tabula %>% rename(END_CLASS = KODS)
+  LAD_polygons$END_CLASS <- as.numeric(LAD_polygons$END_CLASS)
+  LAD_polygons <- left_join(LAD_polygons, tabula, by = "END_CLASS") 
+  st_crs(LAD_polygons) <- st_crs(shape_list[[1]])
+  LAD_polygons <- LAD_polygons %>% dplyr::select(Liela_klase, geometry)
+  
+   tabula2 <- read_excel("..\\Maģistra darbs\\LAD_dati\\kulturaugu kodi.xlsx", sheet = "end intensity")
+   
+   tabula2 <- tabula2 %>% rename(Liela_klase = int_old)
+LAD_polygons <- LAD_polygons %>%
+  left_join(tabula2 %>% 
+              select(Liela_klase, int_new), by = "Liela_klase")
+return(LAD_polygons)
+}
+
+LAD_polygons <- aggregate_intensity_LAD_classes(LAD_polygons, shape_list)
+st_crs(LAD_polygons) <- st_crs(shape_list[1])
+
+ref_raster <- rast(file.path(
+  "../Maģistra darbs/PotentialPedoDiversity",
+  paste0(territory_name, "_PPD"), "END_FILES", "FAO_1", paste0(territory_name, "FAO_13_PPD_index.tif")
+))
+LAD_int_raster <- rasterize(LAD_polygons, ref_raster, fun = max, field = "int_new")
+
+result_raster <- mask(LAD_int_raster, ref_raster) 
+
+writeRaster(result_raster, "..\\Maģistra darbs\\LAD_dati\\Taurene_LAD_dati\\Taurene_LAD_intensity_END.tif", overwrite=TRUE)
+
+ggplot(combined_dataframe, aes(x = cluster, y = PPD_INDEX, group = cluster)) +
+    geom_boxplot() +
+    labs(y = "PPD Index Median", x = "Cluster") +
+    theme_minimal()
+
+```
+
+```{r Attēls}
+combined_dataframe <- read_excel("..\\Maģistra darbs\\PotentialPedoDiversity\\Stat analysis\\PEDODIVERSITY_FOR_ANALYSIS\\FAO3_PPD_dataframe.xlsx")
+
+soil_colors <- data.frame(
+  SOIL_CLASS = c("Anthrosols", "Arenosols", "Calcisols", "Cambisols", "Fluvisols", 
+                 "Gleysols", "Histosols", "Leptosols", "Luvisols", "Phaeozems", 
+                 "Planosols", "Podzols", "Regosols", "Retisols", "Stagnosols", "Umbrisols"),
+  HEX_COLOR = c("#CF9804", "#F5D4A1", "#FEF400", "#FEBE00", "#00FEFD", 
+                "#8083D9", "#706B66", "#DIDIDI", "#FA8484", "#BD6446", 
+                "#F77D3A", "#0CD900", "#FEE3A4", "#FEC2C1", "#40C0E9", "#738E7F")
+)
+soil_colors$SOIL_CLASS <- toupper(soil_colors$SOIL_CLASS)
+
+```
+
+```{r Taurenes grafiki}
+#WORKING WITH TAURENE!
+
+combined_dataframe <- combined_dataframe %>% filter(Teritorija == "Taurene")
+
+#Dataframe for Taurene
+stats_cluster <- combined_dataframe %>%
+  count(cluster, SOIL_CLASS) %>%
+  group_by(cluster) %>%
+  mutate(Proportion_terit = n / sum(n) * 100) %>%
+  ungroup()
+
+stats_cluster_median <- combined_dataframe %>%
+  group_by(cluster) %>%
+  mutate(PPD_median = median(PPD_INDEX)) %>%
+  ungroup() %>%
+  dplyr::select(cluster, PPD_median) %>%
+  distinct()
+
+stats_cluster <- left_join(stats_cluster, stats_cluster_median, by = "cluster")
+stats_cluster <- stats_cluster %>%
+  left_join(soil_colors, by = c("SOIL_CLASS" = "SOIL_CLASS"))
+
+stats_cluster$cluster <- factor(stats_cluster$cluster, levels = 1:10)
+
+stats_cluster <- bind_rows(
+  stats_cluster,
+  tibble(
+    cluster = factor(c(1, 3, 9, 10), levels = 1:10),
+    SOIL_CLASS = NA,
+    Proportion_terit = 0,
+    PPD_median = NA
+  )
+)
+
+point_plot <- ggplot(stats_cluster, aes(x = factor(cluster), y = Proportion_terit, fill = SOIL_CLASS)) +
+  geom_bar(stat = "identity", show.legend = TRUE) + 
+  geom_point(data = stats_cluster, aes(x = factor(cluster), y = PPD_median * 100), color = "black", size = 5, show.legend = FALSE) +
+  geom_text(data = stats_cluster, aes(x = factor(cluster), y = PPD_median * 100, label = round(PPD_median, 2)), vjust = -1.2, size = 12, color = "black") +
+  labs(x = "IC", y = "Proportion", fill = "RSG") +
+  scale_fill_manual(values = setNames(soil_colors$HEX_COLOR, soil_colors$SOIL_CLASS), na.translate = FALSE) +
+  #scale_y_continuous(
+    #sec.axis = sec_axis(transform = ~ . / 100, name = expression("PD"[H]))
+  #) +
+  theme(
+    legend.position.inside = c(1.1, -0.2), 
+    legend.direction = "vertical",
+    legend.key.size = unit(1, "cm"), 
+    legend.text = element_text(size = 24, margin = margin(b = 8, t = 8)),  
+    legend.title = element_text(size = 26), 
+    legend.margin = margin(t = 5, b = 5), 
+    plot.background = element_rect(fill = "white", color = NA),
+    panel.background = element_rect(fill = "white", color = NA),
+    plot.margin = margin(t = 5, r = 5, b = 5, l = 5),
+    axis.title = element_text(size = 24),
+    axis.text = element_text(size = 22),
+    strip.text = element_text(size = 23),
+    axis.title.y.right = element_text(size = 24))
+
+
+ggsave("..\\Fig4_right.jpeg", plot = point_plot, bg = "transparent", width = 16, height = 8, dpi = 300)
+```
+
+```{r Platones grafiki}
+combined_dataframe <- combined_dataframe %>% filter(Teritorija == "Platone")
+
+#Dataframe for Taurene
+stats_cluster <- combined_dataframe %>%
+  count(cluster, SOIL_CLASS) %>%
+  group_by(cluster) %>%
+  mutate(Proportion_terit = n / sum(n) * 100) %>%
+  ungroup()
+
+stats_cluster_median <- combined_dataframe %>%
+  group_by(cluster) %>%
+  mutate(PPD_median = median(PPD_INDEX)) %>%
+  ungroup() %>%
+  dplyr::select(cluster, PPD_median) %>%
+  distinct()
+
+stats_cluster <- left_join(stats_cluster, stats_cluster_median, by = "cluster")
+stats_cluster <- stats_cluster %>%
+  left_join(soil_colors, by = c("SOIL_CLASS" = "SOIL_CLASS"))
+
+stats_cluster$cluster <- factor(stats_cluster$cluster, levels = 1:10)
+
+point_plot <- ggplot(stats_cluster, aes(x = factor(cluster), y = Proportion_terit, fill = SOIL_CLASS)) +
+  geom_bar(stat = "identity", show.legend = FALSE) +
+  geom_point(data = stats_cluster, aes(x = factor(cluster), y = PPD_median * 100), color = "black", size = 5, show.legend = FALSE) +
+  geom_text(data = stats_cluster, aes(x = factor(cluster), y = PPD_median * 100, label = round(PPD_median, 2)), vjust = -1.2, size = 10, color = "black") +
+  labs(x = "IC", y = "Proportion", fill = "RSG") +
+  scale_fill_manual(values = setNames(soil_colors$HEX_COLOR, soil_colors$SOIL_CLASS)) +
+  theme(
+    legend.position.inside = c(1.1, -0.2), 
+    legend.direction = "vertical",
+    legend.key.size = unit(1, "cm"),  
+    legend.text = element_text(size = 18, margin = margin(b = 8, t = 8)),  
+    legend.title = element_text(size = 18),  
+    legend.margin = margin(t = 5, b = 5), 
+    plot.background = element_rect(fill = "white", color = NA),
+    panel.background = element_rect(fill = "white", color = NA),
+    plot.margin = margin(t = 5, r = 5, b = 5, l = 5),
+    axis.title = element_text(size = 24),
+    axis.text = element_text(size = 22),
+    strip.text = element_text(size = 23),
+    axis.title.y.right = element_text(size = 24))
+
+
+ggsave("..\\Fig4_left.jpeg", plot = point_plot, bg = "transparent", width = 12, height = 7, dpi = 300)
+```

@@ -1,0 +1,315 @@
+---
+title: "Pedodiv_stats"
+author: "Marks"
+date: "2025-02-14"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+<br> Izejas fails atrodams github līdzās šim .rmd failam.
+```{r Ielasīt df}
+library(dplyr)
+PPD_DB <- readxl::read_excel("C:\\Users\\mark7\\Latvijas Universitāte\\Maģistri\\4. semestris\\Maģistra darbs\\PotentialPedoDiversity\\Stat analysis\\PEDODIVERSITY_FOR_ANALYSIS\\PPH_FOR_ANALYSIS.xlsx")
+PPD_DB$cluster <- as.factor(PPD_DB$intensity)
+PPD_DB$rowid <- 1:nrow(PPD_DB)
+```
+
+```{r Normality tests}
+library(nortest)
+
+ad_FAO1 <- ad.test(PPD_DB$FAO_1)
+ad_FAO3 <- ad.test(PPD_DB$FAO_3)
+ad_Gr_virs <- ad.test(PPD_DB$Gr_virs)
+ad_Gr_apaks <- ad.test(PPD_DB$Gr_apaks)
+ad_LAK <- ad.test(PPD_DB$LAK)
+
+```
+
+```{r Klāsterizēšana P - sagatavošanās}
+library(factoextra)
+library(cowplot)
+library(scales)
+
+Platone_DB <- PPD_DB %>% filter(Teritorija == "Platone") %>% select(4:8)
+Platone_original <- PPD_DB %>% filter(Teritorija == "Platone") %>% select(4:8)
+Platone_DB_coords <- PPD_DB %>% filter(Teritorija == "Platone") %>% select(1:2) 
+
+Platone_DB <- as.data.frame(scale(Platone_DB))
+```
+
+```{r Klāsterizēšana P - optim. klāsteru skaits}
+elbow <- fviz_nbclust(Platone_DB, kmeans, method = "wss", k.max = 10)
+elbow_img <- elbow + ggtitle("Elbow metode") + scale_y_continuous(labels = label_scientific(digits = 1)) + geom_vline(xintercept = 3, linetype = "dotted", color = "blue", linewidth = 1)
+
+silhouette <- fviz_nbclust(Platone_DB, kmeans, method = "silhouette", k.max = 10) 
+silhouette_img <- silhouette + ggtitle("Silhouette metode") +  geom_vline(xintercept = 2, linetype = "dotted", color = "blue", linewidth = 1) + labs(y = "Avg silh width")
+
+gap_stat <- fviz_gap_stat(cluster::clusGap(Platone_DB, FUN = kmeans, nstart = 5, K.max = 10, B = 10, iter.max = 20))
+gap_stat_img <- gap_stat +
+  ggtitle("Gap statistics metode") + geom_line(linetype = "blank") + geom_vline(xintercept = 3, linetype = "dotted", color = "blue", linewidth = 1)
+
+top_row <- plot_grid(elbow_img, silhouette_img, ncol = 2)
+three_plots <- plot_grid(top_row, gap_stat_img, ncol = 1, rel_heights = c(1, 1))
+
+```
+
+```{r Klāsterizēšana - Platone}
+library(ggplot2)
+library(terra)
+
+set.seed(220)
+P_kmeans <- kmeans(Platone_DB, centers = 3, nstart = 50, iter.max = 30, algorithm = "MacQueen")
+
+Platone_DB_coords$cluster <- P_kmeans$cluster
+Platone_cluster_analysis <- bind_cols(Platone_DB_coords, Platone_original)
+
+Platone_cluster_raster <- rast(Platone_DB_coords[, c("x", "y", "cluster")], type = "xyz", crs = crs(rast("..\\Maģistra darbs\\LAD_dati\\Platone_LAD_dati\\Platone_LAD_intensity_END.tif")))
+
+writeRaster(Platone_cluster_raster, "..\\Maģistra darbs\\PotentialPedoDiversity\\Platone_PPD\\END_FILES\\dub\\Platone_kmeans.tif", overwrite = TRUE)
+
+P_stats <- Platone_cluster_analysis %>%
+  select(-x, -y) %>%
+  group_by(cluster) %>%
+  summarise(across(where(is.numeric), list(
+    #median = median,
+    IQR = IQR
+  ), .names = "{.col}_{.fn}"))
+
+
+
+  
+```
+
+```{r Klāsterizēšana T - sagatavošanās}
+Taurene_DB <- PPD_DB %>% filter(Teritorija == "Taurene") %>% select(4:8)
+Taurene_original <- PPD_DB %>% filter(Teritorija == "Taurene") %>% select(4:8)
+Taurene_DB_coords <- PPD_DB %>% filter(Teritorija == "Taurene") %>% select(1:2) 
+
+Taurene_DB <- as.data.frame(scale(Taurene_DB))
+```
+
+```{r Klāsterizēšana T - optim. klāsteru skaits}
+elbow <- fviz_nbclust(Taurene_DB, kmeans, method = "wss", k.max = 10)
+elbow_img <- elbow + ggtitle("Elbow metode") + scale_y_continuous(labels = label_scientific(digits = 1)) + geom_vline(xintercept = 3, linetype = "dotted", color = "blue", linewidth = 1)
+
+silhouette <- fviz_nbclust(Taurene_DB, kmeans, method = "silhouette", k.max = 10) 
+silhouette_img <- silhouette + ggtitle("Silhouette metode") +  geom_vline(xintercept = 2, linetype = "dotted", color = "blue", linewidth = 1) + labs(y = "Avg silh width")
+
+gap_stat <- fviz_gap_stat(cluster::clusGap(Taurene_DB, FUN = kmeans, nstart = 5, K.max = 10, B = 10, iter.max = 20))
+gap_stat_img <- gap_stat +
+  ggtitle("Gap statistics metode") + geom_line(linetype = "blank") + geom_vline(xintercept = 4, linetype = "dotted", color = "blue", linewidth = 1)
+
+top_row <- plot_grid(elbow_img, silhouette_img, ncol = 2)
+three_plots <- plot_grid(top_row, gap_stat_img, ncol = 1, rel_heights = c(1, 1))
+
+```
+
+```{r Klāsterizēšana - Taurene}
+set.seed(220)
+T_kmeans <- kmeans(Taurene_DB, centers = 3, nstart = 50, iter.max = 30, algorithm = "MacQueen")
+
+Taurene_DB_coords$cluster <- T_kmeans$cluster
+Taurene_cluster_analysis <- bind_cols(Taurene_DB_coords, Taurene_original)
+
+Taurene_cluster_analysis <- Taurene_cluster_analysis %>% 
+  mutate(cluster = case_when(
+    cluster == 3 ~ 2,
+    cluster == 2 ~ 3,
+    TRUE ~ cluster
+  ))
+
+
+Taurene_cluster_raster <- rast(Taurene_DB_coords[, c("x", "y", "cluster")], type = "xyz", crs = crs(rast("..\\Maģistra darbs\\LAD_dati\\Taurene_LAD_dati\\Taurene_LAD_intensity_END.tif")))
+
+
+T_stats <- Taurene_cluster_analysis %>%
+  select(-x, -y) %>%
+  group_by(cluster) %>%
+  summarise(across(where(is.numeric), list(
+    #median = median
+    IQR = IQR
+  ), .names = "{.col}_{.fn}"))
+
+writeRaster(Taurene_cluster_raster, "..\\Maģistra darbs\\PotentialPedoDiversity\\Taurene_PPD\\END_FILES\\dub\\Taurene_kmeans.tif", overwrite = TRUE)
+
+rm(list = setdiff(ls(), c("Taurene_cluster_analysis", "PPD_DB")))
+```
+
+```{r Korelāciju plot}
+corrplot::corrplot.mixed(cor(PPD_DB[7:11]), tl.col = "black", tl.cex = 0.8)
+```
+
+```{r Spatial autocorrelation}
+library(spdep)
+PPD_sf <- sf::st_as_sf(PPD_DB, coords = c("x", "y"), crs = 3059)
+listw <- nb2listw(knn2nb(knearneigh(st_coordinates(PPD_sf), k = 8)), style = "W")
+moran.test(PPD_sf$FAO_1, listw)
+moran.test(PPD_sf$FAO_3, listw)
+moran.test(PPD_sf$LAK, listw)
+moran.test(PPD_sf$Gr_virs, listw)
+moran.test(PPD_sf$Gr_apaks, listw)
+```
+
+```{r Multinom}
+library(nnet)
+library(terra)
+library(dplyr)
+
+PPD_DB <- readxl::read_excel("..\\Maģistra darbs\\PotentialPedoDiversity\\Stat analysis\\PEDODIVERSITY_FOR_ANALYSIS\\PPH_FOR_ANALYSIS.xlsx")
+Platone_kdata <- as.data.frame(rast("..\\Maģistra darbs\\PotentialPedoDiversity\\Platone_PPD\\END_FILES\\dub\\Platone_kmeans.tif"), xy=TRUE)
+Taurene_kdata <- as.data.frame(rast("..\\Maģistra darbs\\PotentialPedoDiversity\\Taurene_PPD\\END_FILES\\dub\\Taurene_kmeans.tif"), xy=TRUE)
+
+kdata <- bind_rows(Platone_kdata, Taurene_kdata)
+PPD_DB <- bind_cols(PPD_DB, kdata %>% select(-x, -y))
+rm(Platone_kdata, Taurene_kdata, kdata)
+
+rm(kdata)
+
+PPD_DB$intensity <- relevel(as.factor(PPD_DB$intensity), ref = "1")
+
+
+
+nom_FAO1 <- multinom(intensity ~ FAO_1 + cluster, data = PPD_DB)
+nom_FAO3 <- multinom(intensity ~ FAO_3 + cluster, data = PPD_DB)
+nom_Gr_apaks <- multinom(intensity ~ Gr_apaks + cluster, data = PPD_DB)
+nom_Gr_virs <- multinom(intensity ~ Gr_virs + cluster, data = PPD_DB)
+nom_LAK <- multinom(intensity ~ LAK + cluster, data = PPD_DB)
+nom_full <- multinom(intensity ~ FAO_1 + FAO_3 + Gr_apaks + Gr_virs + LAK + cluster, data = PPD_DB)
+nom_null <- multinom(intensity ~ 1, data = PPD_DB)
+
+models <- list(nom_null, nom_FAO1, nom_FAO3, nom_Gr_apaks, nom_Gr_virs, nom_LAK, nom_full)
+
+options(digits = 5)
+results <- lapply(models, function(mod) {
+  test <- anova(nom_null, mod, test = "Chisq")
+  data.frame(
+    Variable = deparse(formula(mod)[[3]]),
+    LR_stat = round(test$`LR stat.`[2]),
+    p_value = test$`Pr(Chi)`[2],
+    AIC = AIC(mod)
+  )
+})
+
+do.call(rbind, results)
+
+plot_probabilities <- function(model, type) {
+  model_name <- deparse(substitute(model))
+  
+  if (model_name == "nom_FAO1") {
+    variable <- "FAO_1"
+  } else if (model_name == "nom_Gr_apaks") {
+    variable <- "Gr_apaks"
+  } else if (model_name == "nom_Gr_virs") {
+    variable <- "Gr_virs"
+  }
+
+  odds <- as.data.frame(exp(coef(model)))
+  odds$class <- rownames(odds)
+  odds[, 2] <- odds[, 2]^0.5
+  
+odds <- odds %>%
+  mutate(colour = ifelse(.data[[variable]] > 1, "green", "red"),
+         adjusted_value = .data[[variable]] - 1)
+
+odds$class <- factor(odds$class, levels = odds$class)
+
+# Plot
+plot <- ggplot(odds, aes(x = class, y = adjusted_value, fill = colour)) +
+  geom_col() +
+  geom_hline(yintercept = 0, linetype = "dashed", color = "black") +
+  geom_text(aes(label = round(adjusted_value, 2)),
+            vjust = ifelse(odds$adjusted_value > 0, -0.5, 1.5),
+            size = 4,
+            color = "black") +
+  labs(x = "Intensitātes klase",
+       y = "Attiecība pret references klasi (Δ no 1)") +
+  scale_fill_manual(values = c("red" = "red", "green" = "green")) +
+  theme_minimal() +
+  theme(
+    axis.text = element_text(size = 12),
+    axis.title.x = element_text(size = 12),
+    axis.title.y = element_text(size = 12), 
+    legend.position = "none"
+  ) + 
+  expand_limits(y = c(min(odds$adjusted_value) - 0.2, max(odds$adjusted_value) + 0.2))
+
+if (type == "data") {
+    return(odds)} 
+else if (type == "plot") {
+    return(plot)}
+}
+
+calculate_pseudo_r2 <- function(model) {
+1 - as.numeric(logLik(model)) / as.numeric(logLik(update(model, . ~ 1)))
+}
+```
+
+```{r randomForest}
+library(caret)
+library(doParallel)
+library(foreach)
+library(randomForest)
+
+PPD_DB <- readxl::read_excel("..\\Maģistra darbs\\PotentialPedoDiversity\\Stat analysis\\PEDODIVERSITY_FOR_ANALYSIS\\PPH_FOR_ANALYSIS.xlsx")
+Platone_kdata <- as.data.frame(rast("..\\Maģistra darbs\\PotentialPedoDiversity\\Platone_PPD\\END_FILES\\dub\\Platone_kmeans.tif"), xy=TRUE)
+Taurene_kdata <- as.data.frame(rast("..\\Maģistra darbs\\PotentialPedoDiversity\\Taurene_PPD\\END_FILES\\dub\\Taurene_kmeans.tif"), xy=TRUE)
+
+kdata <- bind_rows(Platone_kdata, Taurene_kdata)
+PPD_DB <- bind_cols(PPD_DB, kdata %>% select(-x, -y))
+rm(Platone_kdata, Taurene_kdata, kdata)
+
+PPD_DB$intensity <- as.factor(PPD_DB$intensity)
+PPD_DB$cluster <- as.factor(PPD_DB$cluster)
+
+PPD_train <- PPD_DB %>%
+  filter(Teritorija == "Platone")
+
+reduced_8 <- PPD_train %>% filter(intensity == 8) %>% slice_sample(prop = 0.01)
+
+other_classes <- PPD_train %>% filter(intensity != 8)
+
+PPD_train <- bind_rows(other_classes, reduced_8)
+rm(other_classes, reduced_8)
+
+PPD_test <- PPD_DB %>%
+  filter(Teritorija == "Taurene")
+
+num_cores <- detectCores() - 1
+cl <- makeCluster(num_cores)
+registerDoParallel(cl)
+
+rf_model <- foreach(ntree = rep(500, num_cores), .combine = "combine", .packages = 'randomForest') %dopar% {
+  randomForest(intensity ~ FAO_1 + FAO_3 + Gr_apaks + Gr_virs + LAK + cluster, 
+               data = PPD_train, 
+               ntree = ntree,
+               mtry = 5,
+               nodesize = 10)}
+
+stopCluster(cl)
+
+PPD_train$predict_intensity <- predict(rf_model, PPD_train) 
+confusionMatrix(PPD_train$predict_intensity, PPD_train$intensity)
+
+PPD_test$predict_intensity <- predict(rf_model, PPD_test)
+confusionMatrix(PPD_test$predict_intensity, PPD_test$intensity)
+
+PPD_test$diff_int <- as.numeric(PPD_test$predict_intensity) - as.numeric(PPD_test$intensity)
+
+plot(rast(PPD_test %>%
+            select(x, y, diff_int),
+          type = "xyz"),
+     breaks = (c(-6.5, -5.5, -3.5, -2.5, 2.5, 4.5, 7.5)),
+     col = c("red", "tomato", "yellow", "yellow", "lightgreen", "green"),
+     main = "Prediction Difference",
+     legend = TRUE
+)
+writeRaster(rast(PPD_test %>%
+            select(x, y, diff_int),
+          type = "xyz", crs = "EPSG:3059"), "..\\Maģistra darbs\\PotentialPedoDiversity\\Taurene_rf_prediction.tif", overwrite=TRUE)
+
+```
+
+
+
