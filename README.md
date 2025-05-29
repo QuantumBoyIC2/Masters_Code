@@ -3,3 +3,7 @@ lauksaimniecības zemju apsaimniekošanas intensitātes gradientā" ietvaros izv
 noteikšanai Taurenes un Platones pagastos.
 
 Izejas dati atrodami https://zenodo.org/records/15525985
+
+This repository contains scripts created for data processing and model fitting on agricultutural land-use intensity and soil diversity. Codelines were developed as a result of Marks Arnolds Župerka's master's thesis "Soil taxonomic and textural classes diversity along the gradient of agricultural land use intensity". 
+
+Source data found here: https://zenodo.org/records/15525985 
